@@ -3,7 +3,7 @@ name: Daily Stock Message
 on:
   schedule:
     # 台灣時間 (UTC+8) 週一至週五下午 16:00 (等於 UTC 時間上午 08:00)
-    - cron: '40 14 * * 1-5'
+    - cron: '45 14 * * 0'
   workflow_dispatch:  # 允許在 GitHub 頁面上手動按鈕觸發測試
 
 jobs:
