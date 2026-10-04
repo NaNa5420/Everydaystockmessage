@@ -73,7 +73,7 @@ def fetch_finance_news():
 # 3. 呼叫 Gemini AI 生成「今日台股重點」
 # ==========================================
 def generate_ai_summary(stock_info, news_list):
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    gemini_api_key = os.getenv("AQ.Ab8RN6K8I9MWih1Mao6DbRrQ-WeE1bQFhpXxMbhs2Wnvx0_pPg")
     if not gemini_api_key:
         raise ValueError("❌ 錯誤：未設定 GEMINI_API_KEY 環境變數")
 
