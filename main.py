@@ -6,7 +6,7 @@ from google import genai
 from dotenv import load_dotenv
 
 # 載入 .env 環境變數
-load_dotenv()  # 會自動抓取 .env
+load_dotenv(dotenv_path=".env", override=True)
 
 # ==========================================
 # 1. 抓取台股數據 (台灣證券交易所 TWSE API)
