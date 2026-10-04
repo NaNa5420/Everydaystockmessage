@@ -118,8 +118,8 @@ def generate_ai_summary(stock_info, news_list):
     models_to_try = ["gemini-3.8-flash"]
 
     for model_name in models_to_try:
-        # 每個模型嘗試最多 2 次
-        for attempt in range(2):
+        max_retries = 5  # 增加重試次數至 5 次       
+        for attempt in range(1, max_retries + 1):
             try:
                 response = client.models.generate_content(
                     model=model_name,
