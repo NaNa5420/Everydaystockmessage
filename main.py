@@ -3,9 +3,10 @@ import datetime
 import requests
 import xml.etree.ElementTree as ET
 from google import genai
-from dotenv import load_dotenv  # 1. 匯入套件
+from dotenv import load_dotenv
 
-load_dotenv()  # 2. 自動載入 .env 裡面的變數
+# 載入 .env 環境變數
+load_dotenv()
 
 # ==========================================
 # 1. 抓取台股數據 (台灣證券交易所 TWSE API)
@@ -18,7 +19,7 @@ def fetch_twse_data():
     
     stock_info = {
         "日期": today_str,
-        "大盤收盤": "暫無數據",
+        "大盤收盤": "暫無數據（可能為非交易日或尚未開盤）",
         "漲跌": "",
         "三大法人買賣超": {}
     }
@@ -34,6 +35,8 @@ def fetch_twse_data():
                     stock_info["大盤收盤"] = row[1]
                     stock_info["漲跌"] = f"{row[2]}{row[3]} ({row[4]}%)"
                     break
+        else:
+            print(f"ℹ️ 今日 TWSE 狀態：{data.get('stat')} (若為週末或假日無盤後數據屬正常現象)")
     except Exception as e:
         print(f"⚠️ 抓取大盤數據失敗: {e}")
 
@@ -66,7 +69,8 @@ def fetch_finance_news():
         items = root.findall("./channel/item")[:8]
         for item in items:
             title = item.find("title").text
-            news_list.append(title)
+            if title:
+                news_list.append(title)
     except Exception as e:
         print(f"⚠️ 抓取新聞失敗: {e}")
     return news_list
@@ -79,6 +83,9 @@ def generate_ai_summary(stock_info, news_list):
     gemini_api_key = os.getenv("GEMINI_API_KEY")
     if not gemini_api_key:
         raise ValueError("❌ 錯誤：未設定 GEMINI_API_KEY 環境變數")
+
+    # 去除前後可能的空格或換行字元，確保 Header 清潔
+    gemini_api_key = gemini_api_key.strip()
 
     client = genai.Client(api_key=gemini_api_key)
 
@@ -102,6 +109,7 @@ def generate_ai_summary(stock_info, news_list):
    💡 【重點總結與觀察】
 2. 適當運用 Emoji，語氣專業熱情。
 3. 排版請適合手機螢幕閱讀，避免過長的內文段落，總字數控制在 300~500 字以內。
+4. 若數據顯示為「暫無數據」，請在回覆中溫馨提醒讀者今日為休市/非交易日，並將重點轉為新聞摘要與未來市場展望。
 """
 
     response = client.models.generate_content(
@@ -121,16 +129,22 @@ def send_line_message(text):
     if not line_token:
         raise ValueError("❌ 錯誤：未設定 LINE_CHANNEL_ACCESS_TOKEN 環境變數")
 
+    line_token = line_token.strip()
+
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {line_token}"
     }
 
+    # 防護機制：LINE 文字單則上限 2000 字
+    if len(text) > 2000:
+        text = text[:1995] + "\n..."
+
     # 如果有指定 LINE_USER_ID 就用 Push API；沒有的話改用 Broadcast API 推播給所有好友
-    if user_id:
+    if user_id and user_id.strip():
         url = "https://api.line.me/v2/bot/message/push"
         payload = {
-            "to": user_id,
+            "to": user_id.strip(),
             "messages": [{"type": "text", "text": text}]
         }
     else:
