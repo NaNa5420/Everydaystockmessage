@@ -457,48 +457,45 @@ def fetch_global_markets():
         "WTI原油": "CL=F",
     }
 
+    # 將所有 Symbol 用逗號串接，一次發送請求
+    symbol_str = ",".join(symbols.values())
+    url = f"https://query1.finance.yahoo.com/v7/finance/quote"
+    params = {"symbols": symbol_str}
+
     result = {}
 
-    for name, symbol in symbols.items():
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            headers=HEADERS,
+            timeout=TIMEOUT
+        )
+        data = response.json()
+        quote_list = data.get("quoteResponse", {}).get("result", [])
 
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        # 代號轉換對照表
+        ticker_map = {v: k for k, v in symbols.items()}
 
-        params = {
-            "range": "2d",
-            "interval": "1d"
-        }
+        for quote in quote_list:
+            symbol = quote.get("symbol")
+            name = ticker_map.get(symbol)
+            if not name:
+                continue
 
-        try:
-            response = requests.get(
-                url,
-                params=params,
-                headers=HEADERS,
-                timeout=TIMEOUT
-            )
-
-            data = response.json()
-
-            meta = data["chart"]["result"][0]["meta"]
-
-            price = meta.get("regularMarketPrice")
-
-            previous = meta.get("chartPreviousClose")
-
-            if price is not None and previous:
-                change = ((price - previous) / previous) * 100
-            else:
-                change = 0
+            price = quote.get("regularMarketPrice")
+            # Yahoo 直接提供的單日官方漲跌幅(%)
+            change_percent = quote.get("regularMarketChangePercent", 0.0)
 
             result[name] = {
                 "價格": price,
-                "漲跌幅": change
+                "漲跌幅": change_percent
             }
 
-        except Exception as e:
-            print(f"⚠️ 國際市場資料失敗 {name}: {e}")
+    except Exception as e:
+        print(f"⚠️ 國際市場資料抓取失敗: {e}")
 
     return result
-
 
 # ==========================================
 # 6. Gemini AI
