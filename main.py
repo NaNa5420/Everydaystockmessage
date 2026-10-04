@@ -3,6 +3,9 @@ import datetime
 import requests
 import xml.etree.ElementTree as ET
 from google import genai
+from dotenv import load_dotenv  # 1. 匯入套件
+
+load_dotenv()  # 2. 自動載入 .env 裡面的變數
 
 # ==========================================
 # 1. 抓取台股數據 (台灣證券交易所 TWSE API)
