@@ -4,6 +4,8 @@ import requests
 import xml.etree.ElementTree as ET
 from google import genai
 from dotenv import load_dotenv
+import time
+from google.genai import errors
 
 # 強制載入同目錄下的 .env 檔案並覆蓋記憶體中的舊變數
 load_dotenv(dotenv_path=".env", override=True)
@@ -112,11 +114,26 @@ def generate_ai_summary(stock_info, news_list):
 4. 若數據顯示為「暫無數據」，請在回覆中溫馨提醒讀者今日為休市/非交易日，並將重點轉為新聞摘要與未來市場展望。
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",  # ✅ 更新為目前的標準模型名稱
-        contents=prompt,
-    )
-    return response.text
+   # 設定優先與備援模型列表
+    models_to_try = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+
+    for model_name in models_to_try:
+        # 每個模型嘗試最多 2 次
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                return response.text
+            except errors.ServerError as e:
+                print(f"⚠️ 模型 {model_name} 伺服器忙碌 (503)，等待 3 秒後重試...")
+                time.sleep(3)
+            except Exception as e:
+                print(f"⚠️ 模型 {model_name} 呼叫失敗 ({e})，準備切換備用模型...")
+                break
+
+    raise RuntimeError("❌ 所有 Gemini 模型皆無法回應，請稍後再試。")
 
 
 # ==========================================
