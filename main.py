@@ -114,7 +114,7 @@ def generate_ai_summary(stock_info, news_list):
 4. 若數據顯示為「暫無數據」，請在回覆中溫馨提醒讀者今日為休市/非交易日，並將重點轉為新聞摘要與未來市場展望。
 """
 
-   # ✅ 指定最新的標準模型 gemini-3.8-flash
+   # ✅ 指定最新的標準模型 gemini-3.8-flash1
     models_to_try = ["gemini-3.8-flash"]
 
     for model_name in models_to_try:
