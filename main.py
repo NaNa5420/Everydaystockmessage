@@ -113,7 +113,7 @@ def generate_ai_summary(stock_info, news_list):
 """
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",  # ✅ 更新為目前的標準模型名稱
+        model="gemini-3.8-flash",  # ✅ 更新為目前的標準模型名稱
         contents=prompt,
     )
     return response.text
