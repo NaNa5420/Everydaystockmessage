@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 from google import genai
 from dotenv import load_dotenv
 
-# 載入 .env 環境變數
+# 強制載入同目錄下的 .env 檔案並覆蓋記憶體中的舊變數
 load_dotenv(dotenv_path=".env", override=True)
 
 # ==========================================
@@ -84,7 +84,7 @@ def generate_ai_summary(stock_info, news_list):
     if not gemini_api_key:
         raise ValueError("❌ 錯誤：未設定 GEMINI_API_KEY 環境變數")
 
-    # 去除前後可能的空格或換行字元，確保 Header 清潔
+    # 去除前後空格與隱形字元
     gemini_api_key = gemini_api_key.strip()
 
     client = genai.Client(api_key=gemini_api_key)
@@ -113,7 +113,7 @@ def generate_ai_summary(stock_info, news_list):
 """
 
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-2.5-flash",  # ✅ 更新為目前的標準模型名稱
         contents=prompt,
     )
     return response.text
