@@ -3,6 +3,7 @@ import datetime
 import requests
 import xml.etree.ElementTree as ET
 import time
+import yfinance as yf
 from google import genai
 from google.genai import errors
 from dotenv import load_dotenv
@@ -87,88 +88,88 @@ def fetch_twse_market():
         "持平家數": "",
     }
 
+    # 嘗試抓取 TWSE 盤後資料
     url = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
-
-    params = {
-        "date": today_str,
-        "type": "ALLBUT0999",
-        "response": "json"
-    }
-
+    params = {"date": today_str, "type": "ALLBUT0999", "response": "json"}
     data = get_json(url, params)
 
-    if not data or data.get("stat") != "OK":
-        print("ℹ️ 今日可能為休市日，沒有 TWSE 盤後資料。")
+    if data and data.get("stat") == "OK":
+        result["是否有資料"] = True
+
+        # --------------------------------------
+        # 找「發行量加權股價指數」
+        # --------------------------------------
+        for table_key in ["data1", "data2", "data3", "data4"]:
+            rows = data.get(table_key, [])
+            for row in rows:
+                if not row:
+                    continue
+                text = str(row[0])
+                if "發行量加權股價指數" in text:
+                    try:
+                        result["加權指數"] = row[1]
+                        result["漲跌點"] = f"{row[2]}{row[3]}"
+                        result["漲跌幅"] = f"{row[4]}%"
+                    except Exception:
+                        pass
+
+        # --------------------------------------
+        # 找市場成交資訊
+        # --------------------------------------
+        for table_key in data:
+            rows = data.get(table_key, [])
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, list) or len(row) < 2:
+                    continue
+                text = str(row[0])
+                if "成交金額" in text and "股票" in text:
+                    try:
+                        result["成交金額"] = row[1]
+                    except Exception:
+                        pass
+
+        # --------------------------------------
+        # 找漲跌家數
+        # --------------------------------------
+        for table_key in data:
+            rows = data.get(table_key, [])
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, list):
+                    continue
+                row_text = " ".join(str(x) for x in row)
+                if "上漲" in row_text and "下跌" in row_text:
+                    try:
+                        result["上漲家數"] = row[1]
+                        result["下跌家數"] = row[2]
+                        result["持平家數"] = row[3]
+                    except Exception:
+                        pass
+
         return result
 
-    result["是否有資料"] = True
-
     # --------------------------------------
-    # 找「發行量加權股價指數」
+    # 保底機制：若 TWSE 無 response（假日/遭封鎖），改用 yfinance 抓取大盤
     # --------------------------------------
+    print("ℹ️ TWSE 盤後無資料或遭阻擋，改用 yfinance 補齊大盤指數...")
+    try:
+        twii = yf.Ticker("^TWII")
+        hist = twii.history(period="5d")
+        if not hist.empty and len(hist) >= 2:
+            close = hist['Close'].iloc[-1]
+            prev_close = hist['Close'].iloc[-2]
+            change = close - prev_close
+            pct = (change / prev_close) * 100
 
-    for table_key in ["data1", "data2", "data3", "data4"]:
-        rows = data.get(table_key, [])
-
-        for row in rows:
-            if not row:
-                continue
-
-            text = str(row[0])
-
-            if "發行量加權股價指數" in text:
-                try:
-                    result["加權指數"] = row[1]
-                    result["漲跌點"] = f"{row[2]}{row[3]}"
-                    result["漲跌幅"] = f"{row[4]}%"
-                except Exception:
-                    pass
-
-    # --------------------------------------
-    # 找市場成交資訊
-    # --------------------------------------
-
-    for table_key in data:
-        rows = data.get(table_key, [])
-
-        if not isinstance(rows, list):
-            continue
-
-        for row in rows:
-            if not isinstance(row, list) or len(row) < 2:
-                continue
-
-            text = str(row[0])
-
-            if "成交金額" in text and "股票" in text:
-                try:
-                    result["成交金額"] = row[1]
-                except Exception:
-                    pass
-
-    # --------------------------------------
-    # 找漲跌家數
-    # --------------------------------------
-
-    for table_key in data:
-        rows = data.get(table_key, [])
-
-        if not isinstance(rows, list):
-            continue
-
-        for row in rows:
-            if not isinstance(row, list):
-                continue
-
-            row_text = " ".join(str(x) for x in row)
-
-            if "上漲" in row_text and "下跌" in row_text:
-                try:
-                    result["上漲家數"] = row[1]
-                    result["下跌家數"] = row[2]
-                    result["持平家數"] = row[3]
-                except Exception:
-                    pass
+            result["加權指數"] = f"{close:,.2f}"
+            result["漲跌點"] = f"{change:+.2f}"
+            result["漲跌幅"] = f"{pct:+.2f}%"
+            result["是否有資料"] = True
+    except Exception as e:
+        print(f"⚠️ yfinance 備援失敗: {e}")
 
     return result
 
@@ -220,7 +221,6 @@ def fetch_institutional_data():
             result["投信"] = format_money(net_buy)
 
         elif "自營商" in name and "合計" not in name:
-            # 只保留自營商自行買賣
             if "自行買賣" in name:
                 result["自營商"] = format_money(net_buy)
 
@@ -258,56 +258,36 @@ def fetch_stock_market():
 
     stock_rows = []
 
-    # MI_INDEX 不同時期 table key 可能不同
-    # 把所有看起來像股票資料的 row 收集起來
     for key, rows in data.items():
-
         if not isinstance(rows, list):
             continue
 
         for row in rows:
-
-            if not isinstance(row, list):
-                continue
-
-            if len(row) < 10:
+            if not isinstance(row, list) or len(row) < 10:
                 continue
 
             try:
                 code = str(row[0]).strip()
                 name = str(row[1]).strip()
 
-                # 避免把指數資料混進來
                 if not code.isdigit():
                     continue
 
                 close = float(str(row[8]).replace(",", ""))
                 change = str(row[9]).strip()
-
-                # row[10] 通常是漲跌價差
-                change_value = float(
-                    str(row[10]).replace(",", "")
-                )
-
-                # 成交金額
-                amount = float(
-                    str(row[4]).replace(",", "")
-                )
+                change_value = float(str(row[10]).replace(",", ""))
+                amount = float(str(row[4]).replace(",", ""))
 
                 if change == "+":
                     percent = (
                         change_value / (close - change_value) * 100
-                        if close - change_value != 0
-                        else 0
+                        if close - change_value != 0 else 0
                     )
-
                 elif change == "-":
                     percent = (
                         -change_value / (close + change_value) * 100
-                        if close + change_value != 0
-                        else 0
+                        if close + change_value != 0 else 0
                     )
-
                 else:
                     percent = 0
 
@@ -322,50 +302,26 @@ def fetch_stock_market():
             except Exception:
                 continue
 
-    # 去除重複股票
-    unique = {}
-
-    for stock in stock_rows:
-        unique[stock["代號"]] = stock
-
+    unique = {stock["代號"]: stock for stock in stock_rows}
     stocks = list(unique.values())
 
-    # 成交金額前五
-    top_volume = sorted(
-        stocks,
-        key=lambda x: x["成交金額"],
-        reverse=True
-    )[:5]
-
-    # 漲幅前五
-    top_gainers = sorted(
-        stocks,
-        key=lambda x: x["漲跌幅"],
-        reverse=True
-    )[:5]
-
-    # 跌幅前五
-    top_losers = sorted(
-        stocks,
-        key=lambda x: x["漲跌幅"]
-    )[:5]
+    top_volume = sorted(stocks, key=lambda x: x["成交金額"], reverse=True)[:5]
+    top_gainers = sorted(stocks, key=lambda x: x["漲跌幅"], reverse=True)[:5]
+    top_losers = sorted(stocks, key=lambda x: x["漲跌幅"])[:5]
 
     for stock in top_volume:
         result["成交金額前五"].append(
-            f'{stock["代號"]} {stock["名稱"]} '
-            f'成交 {format_money(stock["成交金額"])}'
+            f'{stock["代號"]} {stock["名稱"]} 成交 {format_money(stock["成交金額"])}'
         )
 
     for stock in top_gainers:
         result["漲幅前五"].append(
-            f'{stock["代號"]} {stock["名稱"]} '
-            f'{format_percent(stock["漲跌幅"])}'
+            f'{stock["代號"]} {stock["名稱"]} {format_percent(stock["漲跌幅"])}'
         )
 
     for stock in top_losers:
         result["跌幅前五"].append(
-            f'{stock["代號"]} {stock["名稱"]} '
-            f'{format_percent(stock["漲跌幅"])}'
+            f'{stock["代號"]} {stock["名稱"]} {format_percent(stock["漲跌幅"])}'
         )
 
     return result
@@ -386,9 +342,7 @@ def fetch_finance_news():
     news_list = []
 
     for query in queries:
-
         rss_url = "https://news.google.com/rss/search"
-
         params = {
             "q": query,
             "hl": "zh-TW",
@@ -405,11 +359,9 @@ def fetch_finance_news():
             )
 
             root = ET.fromstring(response.content)
-
             items = root.findall("./channel/item")[:5]
 
             for item in items:
-
                 title = item.findtext("title")
                 pub_date = item.findtext("pubDate")
 
@@ -422,17 +374,13 @@ def fetch_finance_news():
         except Exception as e:
             print(f"⚠️ RSS 讀取失敗：{query} / {e}")
 
-    # 去重
     seen = set()
     clean_news = []
 
     for news in news_list:
-
         title = news["標題"]
-
         if title in seen:
             continue
-
         seen.add(title)
         clean_news.append(news)
 
@@ -440,12 +388,10 @@ def fetch_finance_news():
 
 
 # ==========================================
-# 5. 國際市場
-# 使用 Yahoo Finance Chart API
+# 5. 國際市場（改用 yfinance 穩定抓取）
 # ==========================================
 
 def fetch_global_markets():
-
     symbols = {
         "NASDAQ": "^IXIC",
         "S&P 500": "^GSPC",
@@ -457,45 +403,34 @@ def fetch_global_markets():
         "WTI原油": "CL=F",
     }
 
-    # 將所有 Symbol 用逗號串接，一次發送請求
-    symbol_str = ",".join(symbols.values())
-    url = f"https://query1.finance.yahoo.com/v7/finance/quote"
-    params = {"symbols": symbol_str}
-
     result = {}
 
     try:
-        response = requests.get(
-            url,
-            params=params,
-            headers=HEADERS,
-            timeout=TIMEOUT
-        )
-        data = response.json()
-        quote_list = data.get("quoteResponse", {}).get("result", [])
+        ticker_str = " ".join(symbols.values())
+        tickers = yf.Tickers(ticker_str)
 
-        # 代號轉換對照表
-        ticker_map = {v: k for k, v in symbols.items()}
+        for name, symbol in symbols.items():
+            try:
+                hist = tickers.tickers[symbol].history(period="5d")
+                if not hist.empty and len(hist) >= 2:
+                    latest_price = hist['Close'].iloc[-1]
+                    prev_price = hist['Close'].iloc[-2]
+                    change_pct = ((latest_price - prev_price) / prev_price) * 100
 
-        for quote in quote_list:
-            symbol = quote.get("symbol")
-            name = ticker_map.get(symbol)
-            if not name:
-                continue
-
-            price = quote.get("regularMarketPrice")
-            # Yahoo 直接提供的單日官方漲跌幅(%)
-            change_percent = quote.get("regularMarketChangePercent", 0.0)
-
-            result[name] = {
-                "價格": price,
-                "漲跌幅": change_percent
-            }
+                    result[name] = {
+                        "價格": f"{latest_price:,.2f}",
+                        "漲跌幅": change_pct
+                    }
+                else:
+                    result[name] = {"價格": "暫無資料", "漲跌幅": 0.0}
+            except Exception:
+                result[name] = {"價格": "暫無資料", "漲跌幅": 0.0}
 
     except Exception as e:
-        print(f"⚠️ 國際市場資料抓取失敗: {e}")
+        print(f"⚠️ 國際市場抓取失敗: {e}")
 
     return result
+
 
 # ==========================================
 # 6. Gemini AI
@@ -512,26 +447,15 @@ def generate_ai_summary(
     api_key = os.getenv("GEMINI_API_KEY")
 
     if not api_key:
-        raise ValueError(
-            "❌ 未設定 GEMINI_API_KEY"
-        )
+        raise ValueError("❌ 未設定 GEMINI_API_KEY")
 
-    client = genai.Client(
-        api_key=api_key.strip()
-    )
+    client = genai.Client(api_key=api_key.strip())
 
-    news_text = "\n".join(
-        [
-            f"- {item['標題']}"
-            for item in news
-        ]
-    )
+    news_text = "\n".join([f"- {item['標題']}" for item in news])
 
     global_text = "\n".join(
         [
-            f"- {name}: "
-            f"{info['價格']} "
-            f"({format_percent(info['漲跌幅'])})"
+            f"- {name}: {info['價格']} ({format_percent(info['漲跌幅'])})"
             for name, info in global_markets.items()
         ]
     )
@@ -674,48 +598,29 @@ def generate_ai_summary(
 """
 
     models_to_try = [
-        "gemini-3.8-flash"
+        "gemini-2.5-flash"
     ]
 
     for model_name in models_to_try:
-
         for attempt in range(1, 6):
-
             try:
-
-                print(
-                    f"🤖 使用 Gemini 模型："
-                    f"{model_name} "
-                    f"(第 {attempt} 次)"
-                )
-
+                print(f"🤖 使用 Gemini 模型：{model_name} (第 {attempt} 次)")
                 response = client.models.generate_content(
                     model=model_name,
                     contents=prompt
                 )
-
                 if response.text:
                     return response.text.strip()
 
             except errors.ServerError as e:
-
-                print(
-                    f"⚠️ Gemini 伺服器忙碌：{e}"
-                )
-
+                print(f"⚠️ Gemini 伺服器忙碌：{e}")
                 time.sleep(3)
 
             except Exception as e:
-
-                print(
-                    f"⚠️ Gemini 呼叫失敗：{e}"
-                )
-
+                print(f"⚠️ Gemini 呼叫失敗：{e}")
                 break
 
-    raise RuntimeError(
-        "❌ 所有 Gemini 模型皆無法回應"
-    )
+    raise RuntimeError("❌ 所有 Gemini 模型皆無法回應")
 
 
 # ==========================================
@@ -723,56 +628,30 @@ def generate_ai_summary(
 # ==========================================
 
 def send_line_message(text):
-
-    token = os.getenv(
-        "LINE_CHANNEL_ACCESS_TOKEN"
-    )
-
+    token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
     user_id = os.getenv("LINE_USER_ID")
 
     if not token:
-        raise ValueError(
-            "❌ 未設定 LINE_CHANNEL_ACCESS_TOKEN"
-        )
+        raise ValueError("❌ 未設定 LINE_CHANNEL_ACCESS_TOKEN")
 
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token.strip()}"
     }
 
-    # LINE 單則文字訊息限制
     if len(text) > 4900:
         text = text[:4890] + "\n..."
 
     if user_id and user_id.strip():
-
-        url = (
-            "https://api.line.me/v2/bot/message/push"
-        )
-
+        url = "https://api.line.me/v2/bot/message/push"
         payload = {
             "to": user_id.strip(),
-            "messages": [
-                {
-                    "type": "text",
-                    "text": text
-                }
-            ]
+            "messages": [{"type": "text", "text": text}]
         }
-
     else:
-
-        url = (
-            "https://api.line.me/v2/bot/message/broadcast"
-        )
-
+        url = "https://api.line.me/v2/bot/message/broadcast"
         payload = {
-            "messages": [
-                {
-                    "type": "text",
-                    "text": text
-                }
-            ]
+            "messages": [{"type": "text", "text": text}]
         }
 
     response = requests.post(
@@ -783,16 +662,9 @@ def send_line_message(text):
     )
 
     if response.status_code == 200:
-
         print("✅ LINE 推播成功")
-
     else:
-
-        print(
-            f"❌ LINE 推播失敗 "
-            f"{response.status_code}: "
-            f"{response.text}"
-        )
+        print(f"❌ LINE 推播失敗 {response.status_code}: {response.text}")
 
 
 # ==========================================
@@ -808,61 +680,45 @@ def main():
     # --------------------------------------
     # 1. 台股
     # --------------------------------------
-
     print("\n1/6 📈 抓取台股大盤...")
-
     market = fetch_twse_market()
-
     print(market)
+    time.sleep(3)  # 防止 TWSE 阻擋 IP
 
     # --------------------------------------
     # 2. 法人
     # --------------------------------------
-
     print("\n2/6 🏦 抓取三大法人...")
-
     institutions = fetch_institutional_data()
-
     print(institutions)
+    time.sleep(3)  # 防止 TWSE 阻擋 IP
 
     # --------------------------------------
     # 3. 個股
     # --------------------------------------
-
     print("\n3/6 🔥 抓取個股排行...")
-
     stocks = fetch_stock_market()
-
     print(stocks)
+    time.sleep(3)
 
     # --------------------------------------
     # 4. 新聞
     # --------------------------------------
-
     print("\n4/6 📰 抓取財經新聞...")
-
     news = fetch_finance_news()
-
-    print(
-        f"取得 {len(news)} 則新聞"
-    )
+    print(f"取得 {len(news)} 則新聞")
 
     # --------------------------------------
     # 5. 國際
     # --------------------------------------
-
     print("\n5/6 🌎 抓取國際市場...")
-
     global_markets = fetch_global_markets()
-
     print(global_markets)
 
     # --------------------------------------
     # 6. Gemini
     # --------------------------------------
-
     print("\n6/6 🤖 產生 AI 盤後分析...")
-
     summary = generate_ai_summary(
         market,
         institutions,
@@ -876,11 +732,9 @@ def main():
     print("=" * 60)
 
     # --------------------------------------
-    # LINE
+    # LINE 推播
     # --------------------------------------
-
     print("\n📱 發送 LINE...")
-
     send_line_message(summary)
 
     print("\n🎉 今日任務完成！")
