@@ -31,26 +31,7 @@ def get_taipei_now():
 
 
 # ==========================================
-# 工具：安全 GET JSON
-# ==========================================
-
-def get_json(url, params=None):
-    try:
-        response = requests.get(
-            url,
-            params=params,
-            headers=HEADERS,
-            timeout=TIMEOUT
-        )
-        response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"⚠️ API 讀取失敗：{url} -> {e}")
-        return None
-
-
-# ==========================================
-# 工具：數字與金額格式化
+# 工具：格式化函數
 # ==========================================
 
 def format_money(value):
@@ -73,75 +54,71 @@ def format_percent(value):
 
 
 # ==========================================
-# 1. 台股大盤 (TWSE + yfinance 備援)
+# 1. 台股大盤 + 櫃買指數 (yfinance 優先)
 # ==========================================
 
-def fetch_twse_market():
+def fetch_twse_and_otc_market():
     taipei_now = get_taipei_now()
-    today_str = taipei_now.strftime("%Y%m%d")
 
     result = {
         "日期": taipei_now.strftime("%Y-%m-%d"),
-        "是否有資料": False,
         "加權指數": "暫無資料",
-        "漲跌點": "",
-        "漲跌幅": "",
-        "成交金額": "暫無資料",
-        "上漲家數": "",
-        "下跌家數": "",
-        "持平家數": "",
+        "加權漲跌": "",
+        "加權成交量": "暫無資料",
+        "櫃買指數": "暫無資料",
+        "櫃買漲跌": "",
+        "櫃買成交量": "暫無資料",
     }
 
-    # 1. 嘗試 TWSE Web API
-    url = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
-    params = {"date": today_str, "type": "ALLBUT0999", "response": "json"}
-    data = get_json(url, params)
-
-    if data and data.get("stat") == "OK":
-        result["是否有資料"] = True
-        for table_key in ["data1", "data2", "data3", "data4"]:
-            for row in data.get(table_key, []):
-                if row and "發行量加權股價指數" in str(row[0]):
-                    try:
-                        result["加權指數"] = row[1]
-                        result["漲跌點"] = f"{row[2]}{row[3]}"
-                        result["漲跌幅"] = f"{row[4]}%"
-                    except Exception:
-                        pass
-
-        for table_key in data:
-            rows = data.get(table_key, [])
-            if isinstance(rows, list):
-                for row in rows:
-                    if isinstance(row, list) and len(row) >= 2:
-                        if "成交金額" in str(row[0]) and "股票" in str(row[0]):
-                            result["成交金額"] = row[1]
-                        if "上漲" in " ".join(str(x) for x in row) and "下跌" in " ".join(str(x) for x in row):
-                            try:
-                                result["上漲家數"] = row[1]
-                                result["下跌家數"] = row[2]
-                                result["持平家數"] = row[3]
-                            except Exception:
-                                pass
-        return result
-
-    # 2. 保底機制：使用 yfinance 抓取大盤指數
-    print("ℹ️ TWSE Web API 查無資料或遭阻擋，啟用 yfinance 備援大盤...")
+    # 1. 使用 yfinance 抓取加權指數 (^TWII) 與 櫃買指數 (^TWOII)
     try:
-        twii = yf.Ticker("^TWII")
-        hist = twii.history(period="5d")
-        if not hist.empty and len(hist) >= 2:
-            close = hist['Close'].iloc[-1]
-            prev_close = hist['Close'].iloc[-2]
-            change = close - prev_close
-            pct = (change / prev_close) * 100
+        tickers = yf.Tickers("^TWII ^TWOII")
+
+        # 加權指數
+        twii_hist = tickers.tickers["^TWII"].history(period="5d")
+        if not twii_hist.empty and len(twii_hist) >= 2:
+            close = twii_hist['Close'].iloc[-1]
+            prev = twii_hist['Close'].iloc[-2]
+            change = close - prev
+            pct = (change / prev) * 100
+            vol = twii_hist['Volume'].iloc[-1]
 
             result["加權指數"] = f"{close:,.2f}"
-            result["漲跌點"] = f"{change:+.2f}"
-            result["漲跌幅"] = f"{pct:+.2f}%"
-            result["是否有資料"] = True
+            result["加權漲跌"] = f"{change:+.2f} ({pct:+.2f}%)"
+            result["加權成交量"] = f"{vol / 100000000:.1f} 億股" if vol > 0 else "已收盤"
+
+        # 櫃買指數
+        twoii_hist = tickers.tickers["^TWOII"].history(period="5d")
+        if not twoii_hist.empty and len(twoii_hist) >= 2:
+            close_otc = twoii_hist['Close'].iloc[-1]
+            prev_otc = twoii_hist['Close'].iloc[-2]
+            change_otc = close_otc - prev_otc
+            pct_otc = (change_otc / prev_otc) * 100
+            vol_otc = twoii_hist['Volume'].iloc[-1]
+
+            result["櫃買指數"] = f"{close_otc:,.2f}"
+            result["櫃買漲跌"] = f"{change_otc:+.2f} ({pct_otc:+.2f}%)"
+            result["櫃買成交量"] = f"{vol_otc / 100000000:.1f} 億股" if vol_otc > 0 else "已收盤"
+
     except Exception as e:
-        print(f"⚠️ yfinance 備援大盤失敗: {e}")
+        print(f"⚠️ yfinance 大盤/櫃買抓取失敗: {e}")
+
+    # 2. 嘗試向 TWSE 官方 API 補充金額與進階成交金額（若成功則覆蓋金額資料）
+    try:
+        today_str = taipei_now.strftime("%Y%m%d")
+        url = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
+        res = requests.get(url, params={"date": today_str, "type": "ALLBUT0999", "response": "json"}, headers=HEADERS, timeout=TIMEOUT)
+        data = res.json()
+        if data.get("stat") == "OK":
+            for table_key in data:
+                rows = data.get(table_key, [])
+                if isinstance(rows, list):
+                    for row in rows:
+                        if isinstance(row, list) and len(row) >= 2:
+                            if "成交金額" in str(row[0]) and "股票" in str(row[0]):
+                                result["加權成交量"] = f"{row[1]} 元"
+    except Exception:
+        pass  # 若 TWSE 阻擋 IP，沿用 yfinance 抓到的數據即可
 
     return result
 
@@ -155,8 +132,6 @@ def fetch_institutional_data():
     url = "https://www.twse.com.tw/rwd/zh/fund/BFI82U"
     params = {"dayDate": today_str, "type": "day", "response": "json"}
 
-    data = get_json(url, params)
-
     result = {
         "外資": "暫無資料",
         "投信": "暫無資料",
@@ -164,123 +139,78 @@ def fetch_institutional_data():
         "三大法人合計": "暫無資料"
     }
 
-    if not data or data.get("stat") != "OK":
-        return result
+    try:
+        res = requests.get(url, params=params, headers=HEADERS, timeout=TIMEOUT)
+        data = res.json()
+        if data.get("stat") == "OK":
+            for row in data.get("data", []):
+                if not row:
+                    continue
+                name = str(row[0]).strip()
+                try:
+                    net_buy = float(str(row[3]).replace(",", ""))
+                except Exception:
+                    continue
 
-    for row in data.get("data", []):
-        if not row:
-            continue
-        name = str(row[0]).strip()
-        try:
-            net_buy = float(str(row[3]).replace(",", ""))
-        except Exception:
-            continue
-
-        if "外資及陸資" in name:
-            result["外資"] = format_money(net_buy)
-        elif name == "投信":
-            result["投信"] = format_money(net_buy)
-        elif "自營商" in name and "自行買賣" in name:
-            result["自營商"] = format_money(net_buy)
-        elif name == "合計":
-            result["三大法人合計"] = format_money(net_buy)
+                if "外資及陸資" in name:
+                    result["外資"] = format_money(net_buy)
+                elif name == "投信":
+                    result["投信"] = format_money(net_buy)
+                elif "自營商" in name and "自行買賣" in name:
+                    result["自營商"] = format_money(net_buy)
+                elif name == "合計":
+                    result["三大法人合計"] = format_money(net_buy)
+    except Exception as e:
+        print(f"⚠️ 三大法人抓取失敗: {e}")
 
     return result
 
 
 # ==========================================
-# 3. 個股行情 (TWSE + yfinance 權值股熱門備援)
+# 3. 個股行情 (上市權值 + 櫃買熱門股)
 # ==========================================
 
 def fetch_stock_market():
-    today_str = get_taipei_now().strftime("%Y%m%d")
-    url = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
-    params = {"date": today_str, "type": "ALLBUT0999", "response": "json"}
-
-    data = get_json(url, params)
-
     result = {
-        "成交金額前五": [],
-        "漲幅前五": [],
-        "跌幅前五": []
+        "上市熱門股": [],
+        "櫃買強勢股": []
     }
 
-    stock_rows = []
-
-    if data and data.get("stat") == "OK":
-        for key, rows in data.items():
-            if isinstance(rows, list):
-                for row in rows:
-                    if isinstance(row, list) and len(row) >= 10:
-                        try:
-                            code = str(row[0]).strip()
-                            name = str(row[1]).strip()
-                            if not code.isdigit():
-                                continue
-
-                            close = float(str(row[8]).replace(",", ""))
-                            change = str(row[9]).strip()
-                            change_value = float(str(row[10]).replace(",", ""))
-                            amount = float(str(row[4]).replace(",", ""))
-
-                            if change == "+":
-                                percent = (change_value / (close - change_value) * 100) if close != change_value else 0
-                            elif change == "-":
-                                percent = (-change_value / (close + change_value) * 100)
-                            else:
-                                percent = 0
-
-                            stock_rows.append({
-                                "代號": code, "名稱": name, "收盤": close,
-                                "漲跌幅": percent, "成交金額": amount
-                            })
-                        except Exception:
-                            continue
-
-    # 若 TWSE 抓到資料，進行排序輸出
-    if stock_rows:
-        unique = {stock["代號"]: stock for stock in stock_rows}
-        stocks = list(unique.values())
-
-        top_volume = sorted(stocks, key=lambda x: x["成交金額"], reverse=True)[:5]
-        top_gainers = sorted(stocks, key=lambda x: x["漲跌幅"], reverse=True)[:5]
-        top_losers = sorted(stocks, key=lambda x: x["漲跌幅"])[:5]
-
-        result["成交金額前五"] = [f'{s["代號"]} {s["名稱"]} 成交 {format_money(s["成交金額"])}' for s in top_volume]
-        result["漲幅前五"] = [f'{s["代號"]} {s["名稱"]} {format_percent(s["漲跌幅"])}' for s in top_gainers]
-        result["跌幅前五"] = [f'{s["代號"]} {s["名稱"]} {format_percent(s["漲跌幅"])}' for s in top_losers]
-        return result
-
-    # ----------------------------------------------------
-    # 保底機制：當 TWSE 被擋 IP，改用 yfinance 抓取焦點權值股
-    # ----------------------------------------------------
-    print("ℹ️ TWSE 個股資料無回應，啟用 yfinance 熱門權值股備援...")
-    focus_tickers = {
+    # 使用 yfinance 抓取台股上市與上櫃指標焦點股
+    tw_tickers = {
         "2330.TW": "台積電", "2317.TW": "鴻海", "2454.TW": "聯發科",
-        "2308.TW": "台達電", "2881.TW": "富邦金", "2382.TW": "廣達",
-        "3231.TW": "緯創", "2603.TW": "長榮", "3008.TW": "大立光"
+        "2382.TW": "廣達", "2881.TW": "富邦金", "3231.TW": "緯創"
     }
+    otc_tickers = {
+        "3293.TWO": "鈊象", "6488.TWO": "環球晶", "8069.TWO": "元太",
+        "3529.TWO": "力旺", "6121.TWO": "新普", "5483.TWO": "中美晶"
+    }
+
+    all_symbols = list(tw_tickers.keys()) + list(otc_tickers.keys())
 
     try:
-        tickers_data = yf.Tickers(" ".join(focus_tickers.keys()))
-        yf_stocks = []
+        tickers_data = yf.Tickers(" ".join(all_symbols))
 
-        for symbol, name in focus_tickers.items():
-            hist = tickers_data.tickers[symbol].history(period="5d")
+        # 處理上市焦點
+        for sym, name in tw_tickers.items():
+            hist = tickers_data.tickers[sym].history(period="5d")
             if not hist.empty and len(hist) >= 2:
                 close = hist['Close'].iloc[-1]
-                prev_close = hist['Close'].iloc[-2]
-                pct = ((close - prev_close) / prev_close) * 100
-                yf_stocks.append({"代號": symbol.replace(".TW", ""), "名稱": name, "收盤": close, "漲跌幅": pct})
+                prev = hist['Close'].iloc[-2]
+                pct = ((close - prev) / prev) * 100
+                result["上市熱門股"].append(f"{sym.replace('.TW','')} {name}: {close:,.1f}元 ({format_percent(pct)})")
 
-        if yf_stocks:
-            sorted_gainers = sorted(yf_stocks, key=lambda x: x["漲跌幅"], reverse=True)
-            result["成交金額前五"] = [f'{s["代號"]} {s["名稱"]} 收盤 {s["收盤"]:,.1f} 元 ({format_percent(s["漲跌幅"])})' for s in yf_stocks[:5]]
-            result["漲幅前五"] = [f'{s["代號"]} {s["名稱"]} {format_percent(s["漲跌幅"])}' for s in sorted_gainers[:3]]
-            result["跌幅前五"] = [f'{s["代號"]} {s["名稱"]} {format_percent(s["漲跌幅"])}' for s in sorted_gainers[-3:]]
+        # 處理櫃買焦點
+        for sym, name in otc_tickers.items():
+            hist = tickers_data.tickers[sym].history(period="5d")
+            if not hist.empty and len(hist) >= 2:
+                close = hist['Close'].iloc[-1]
+                prev = hist['Close'].iloc[-2]
+                pct = ((close - prev) / prev) * 100
+                result["櫃買強勢股"].append(f"{sym.replace('.TWO','')} {name}: {close:,.1f}元 ({format_percent(pct)})")
 
     except Exception as e:
-        print(f"⚠️ yfinance 個股備援失敗: {e}")
+        print(f"⚠️ 個股行情抓取失敗: {e}")
 
     return result
 
@@ -290,7 +220,7 @@ def fetch_stock_market():
 # ==========================================
 
 def fetch_finance_news():
-    queries = ["台股 財經", "台積電", "AI 半導體 台股", "美股 聯準會"]
+    queries = ["台股 財經", "櫃買市場", "台積電", "AI 半導體", "美股 聯準會"]
     news_list = []
 
     for query in queries:
@@ -300,7 +230,7 @@ def fetch_finance_news():
         try:
             response = requests.get(rss_url, params=params, headers=HEADERS, timeout=TIMEOUT)
             root = ET.fromstring(response.content)
-            for item in root.findall("./channel/item")[:5]:
+            for item in root.findall("./channel/item")[:3]:
                 title = item.findtext("title")
                 pub_date = item.findtext("pubDate")
                 if title:
@@ -315,11 +245,11 @@ def fetch_finance_news():
             seen.add(news["標題"])
             clean_news.append(news)
 
-    return clean_news[:15]
+    return clean_news[:12]
 
 
 # ==========================================
-# 5. 國際市場 (yfinance 穩定抓取)
+# 5. 國際市場 (yfinance)
 # ==========================================
 
 def fetch_global_markets():
@@ -336,10 +266,10 @@ def fetch_global_markets():
             try:
                 hist = tickers.tickers[symbol].history(period="5d")
                 if not hist.empty and len(hist) >= 2:
-                    latest_price = hist['Close'].iloc[-1]
-                    prev_price = hist['Close'].iloc[-2]
-                    change_pct = ((latest_price - prev_price) / prev_price) * 100
-                    result[name] = {"價格": f"{latest_price:,.2f}", "漲跌幅": change_pct}
+                    latest = hist['Close'].iloc[-1]
+                    prev = hist['Close'].iloc[-2]
+                    pct = ((latest - prev) / prev) * 100
+                    result[name] = {"價格": f"{latest:,.2f}", "漲跌幅": pct}
                 else:
                     result[name] = {"價格": "暫無資料", "漲跌幅": 0.0}
             except Exception:
@@ -351,7 +281,7 @@ def fetch_global_markets():
 
 
 # ==========================================
-# 6. Gemini AI 分析
+# 6. Gemini AI 分析生成
 # ==========================================
 
 def generate_ai_summary(market, institutions, stocks, news, global_markets):
@@ -365,25 +295,23 @@ def generate_ai_summary(market, institutions, stocks, news, global_markets):
     global_text = "\n".join([f"- {name}: {info['價格']} ({format_percent(info['漲跌幅'])})" for name, info in global_markets.items()])
 
     prompt = f"""
-你是一位專業的台股盤後分析師。請根據「真實市場資料」整理今天的台股盤後情報。
+你是一位專業的台股盤後分析師。請根據「真實市場資料」整理今天的台股與櫃買市場盤後情報。
 
 重要規則：
-1. 不可以自行捏造數字。
-2. 如果資料是「暫無資料」，必須明確寫出。
-3. 不要把新聞標題當成已確認的事實。
-4. 不要提供買進、賣出或個股投資建議。
-5. 內容適合 LINE 閱讀，長度約 700～1000 字，使用繁體中文。
+1. 不可以捏造數據。若有數據請精準呈現。
+2. 請同時分析「上市加權指數」與「上櫃櫃買指數」的表現。
+3. 內容適合 LINE 閱讀，長度約 700～1000 字，使用繁體中文。
 
 ━━━━━━━━━━━━━━━━━━
-【台股大盤】
+【台股大盤與櫃買市場】
 日期：{market.get("日期")}
 加權指數：{market.get("加權指數")}
-漲跌點：{market.get("漲跌點")}
-漲跌幅：{market.get("漲跌幅")}
-成交金額：{market.get("成交金額")}
-上漲家數：{market.get("上漲家數")}
-下跌家數：{market.get("下跌家數")}
-持平家數：{market.get("持平家數")}
+加權漲跌：{market.get("加權漲跌")}
+加權成交量/金額：{market.get("加權成交量")}
+
+櫃買指數：{market.get("櫃買指數")}
+櫃買漲跌：{market.get("櫃買漲跌")}
+櫃買成交量：{market.get("櫃買成交量")}
 
 【三大法人】
 外資：{institutions.get("外資")}
@@ -391,14 +319,11 @@ def generate_ai_summary(market, institutions, stocks, news, global_markets):
 自營商：{institutions.get("自營商")}
 三大法人合計：{institutions.get("三大法人合計")}
 
-【成交金額前五】
-{chr(10).join(stocks["成交金額前五"])}
+【上市熱門股】
+{chr(10).join(stocks["上市熱門股"])}
 
-【漲幅前五】
-{chr(10).join(stocks["漲幅前五"])}
-
-【跌幅前五】
-{chr(10).join(stocks["跌幅前五"])}
+【櫃買強勢/指標股】
+{chr(10).join(stocks["櫃買強勢股"])}
 
 【國際市場】
 {global_text}
@@ -407,28 +332,30 @@ def generate_ai_summary(market, institutions, stocks, news, global_markets):
 {news_text}
 ━━━━━━━━━━━━━━━━━━
 
-請使用以下格式輸出：
+請嚴格使用以下格式輸出：
 
-📊 【台股收盤】
-- 指數 / 漲跌幅 / 成交金額 / 市場氣氛
+📊 【台股與櫃買收盤】
+- 加權指數與櫃買指數表現（包含指數、漲跌幅、成交量/金額）
+- 上市與上櫃市場氣氛對比（例如大型權值股 vs 中小型題材股）
 
-🏦 【三大法人】
-- 外資 / 投信 / 自營商 / 合計與資金方向
+🏦 【三大法人動向】
+- 外資 / 投信 / 自營商 買賣超金額與籌碼流向
 
-🔥 【個股焦點】
-- 指標權值股與焦點強弱勢股說明
+🔥 【個股與族群焦點】
+- 上市大型權值股（台積電、鴻海等）走勢分析
+- 櫃買中小型焦點股動態
 
-🌎 【國際市場】
-- 主要指數與匯率商品動態
+🌎 【國際市場連動】
+- 美股四大指數、費半與日韓股對台股的影響
 
-📰 【今日重要新聞】
-- 3~5 則重點新聞摘要
+📰 【今日重要新聞摘要】
+- 挑選 3～5 則重點財經新聞並簡短摘要
 
-⚠️ 【明日市場焦點】
-- 觀察重點與事件
+⚠️ 【明日觀察重點】
+- 美國經濟數據、重要法說與盤勢關鍵點
 
-💡 【AI 盤後觀察】
-- 3 句話總結今日走勢與明日關鍵
+💡 【AI 盤後總結】
+- 3 句話精準總結今日盤勢與明日策略
 
 ⚠️ 本內容為市場資訊整理，不構成投資建議。
 """
@@ -488,23 +415,20 @@ def send_line_message(text):
 
 def main():
     print("=" * 60)
-    print("🚀 台股每日盤後情報 Bot (台灣時間整合版)")
+    print("🚀 台股+櫃買每日盤後情報 Bot")
     print("=" * 60)
 
-    print("\n1/6 📈 抓取台股大盤...")
-    market = fetch_twse_market()
+    print("\n1/6 📈 抓取台股加權與櫃買指數...")
+    market = fetch_twse_and_otc_market()
     print(market)
-    time.sleep(3)
 
     print("\n2/6 🏦 抓取三大法人...")
     institutions = fetch_institutional_data()
     print(institutions)
-    time.sleep(3)
 
-    print("\n3/6 🔥 抓取個股排行...")
+    print("\n3/6 🔥 抓取上市櫃焦點個股...")
     stocks = fetch_stock_market()
     print(stocks)
-    time.sleep(3)
 
     print("\n4/6 📰 抓取財經新聞...")
     news = fetch_finance_news()
