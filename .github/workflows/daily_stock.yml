@@ -5,7 +5,7 @@ on:
     # 台灣時間週一至週五 15:30
     # GitHub Actions 使用 UTC
     # 台灣 15:30 = UTC 07:30
-    - cron: '30 7 * * 1-5'
+    - cron: '0 2 * * 1-5'
 
   # 允許在 GitHub Actions 頁面手動執行
   workflow_dispatch:
